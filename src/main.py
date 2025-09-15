@@ -1,27 +1,17 @@
 import os
 import json
 from dotenv import load_dotenv
+import ollama
 
-from google import genai
-from google.genai import types
-
-MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-pro-exp-02-05",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
-]
-MODEL = MODELS[0]
+OLLAMA_MODEL = "gemma3:12b"
 
 SYSTEM_PROMPT = """
-あなたはVRレストランの「食品マッチャー」です。出力は必ずJSONのみで返し、説明文は一切含めないこと。
+あなたはVRレストランの「食品マッチャー」および「名詞翻訳者」です。出力は必ずJSONのみで返し、説明文は一切含めないこと。
 
 [目的]
 - ユーザー入力 query が示す食品の「弾力(chewiness)」と「硬度(firmness)」を1〜10の整数で推定する。
   - スケール定義: 1=極めて低い / 10=極めて高い（四捨五入して整数化）
-- 推定した弾力・硬度に最も近い食品を、与えられた candidates 配列の中から1件だけ選ぶ。
-- candidates に存在しない名称を生成してはならない。必ず candidates の name を返すこと。
+- 推定した弾力・硬度に最も近い食品を、与えられた candidates 配列の中から1件だけ選び、それを英訳したものを返す。
 
 [安全規約]
 - 以下の語（例示）に該当する単語は「評価に用いず無視」すること（ただし他の要素からは判定を続行する）:
@@ -39,7 +29,14 @@ SYSTEM_PROMPT = """
 - 禁止事項: candidates 以外の名称や自由記述、理由テキストを出力してはならない。
 
 [出力仕様]
-- JSONのみ。キーはスキーマに厳密に従うこと。
+- JSONのみ。キーはスキーマに厳密に従うこと。以下の形式で出力してください:
+{
+  "status": "ok" または "review",
+  "chewiness": 1-10の整数,
+  "firmness": 1-10の整数,
+  "best_name": "候補の名前" (statusが"ok"の場合),
+  "top_names": ["候補1", "候補2", "候補3"] (statusが"review"の場合)
+}
 """
 
 #
@@ -57,42 +54,51 @@ SYSTEM_PROMPT = """
 #   ・top_names: list[string]
 #       最も近しいサンプル食品TOP3（review時有効）
 #
-RESPONSE_SCHEMA = {
-    "type": "OBJECT",
-    "required": ["status","chewiness","firmness"],
-    "properties": {
-        "status": {"type":"STRING","enum":["ok","review"]},
-        "chewiness": {"type":"INTEGER"},
-        "firmness": {"type":"INTEGER"},
-        "best_name": {"type":"STRING"},
-        "top_names": {"type":"ARRAY","items":{"type":"STRING"}}
-    }
-}
 
 
 load_dotenv(verbose = True)
-if "GOOGLE_API_KEY" not in os.environ:
-    raise EnvironmentError("Google Gemini API key not found in .env file")
-API_KEY = os.environ["GOOGLE_API_KEY"]
 
-client = genai.Client(api_key = API_KEY)
+# Ollamaクライアントの初期化
+ollama_client = ollama.Client()
 
 
 def choose_dish(user_request : str, candidates : list):
     user_input = {"query": user_request, "candidates": candidates}
-    response = client.models.generate_content(
-        model = MODEL,
-        contents = [
-            types.Part.from_text(text = json.dumps(user_input, ensure_ascii = False))
+    user_input_json = json.dumps(user_input, ensure_ascii=False)
+    
+    # Ollamaを使用してレスポンスを生成
+    response = ollama_client.chat(
+        model=OLLAMA_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_input_json}
         ],
-        config = types.GenerateContentConfig(
-            system_instruction = SYSTEM_PROMPT,
-            response_mime_type = "application/json",
-            response_schema = RESPONSE_SCHEMA,
-            temperature = 0
-        ),
+        options={
+            "temperature": 0,
+            "num_predict": 500  # 最大トークン数を制限
+        }
     )
-    return json.loads(response.text)
+    
+    try:
+        # レスポンステキストからJSONを抽出
+        response_text = response['message']['content'].strip()
+        
+        # JSONブロックが```json```で囲まれている場合は抽出
+        if response_text.startswith('```json'):
+            response_text = response_text[7:-3].strip()
+        elif response_text.startswith('```'):
+            response_text = response_text[3:-3].strip()
+        
+        return json.loads(response_text)
+    except (json.JSONDecodeError, KeyError) as e:
+        # JSONパースエラーの場合はエラー情報を返す
+        return {
+            "status": "error",
+            "chewiness": 5,
+            "firmness": 5,
+            "error": f"Failed to parse JSON response: {str(e)}",
+            "raw_response": response.get('message', {}).get('content', '')
+        }
 
 if __name__ == '__main__':
     # 筋電データをとった食品のリスト

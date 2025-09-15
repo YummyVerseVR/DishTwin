@@ -1,0 +1,11 @@
+[project]
+name = "dishtwin"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "google-genai>=1.36.0",
+    "python-dotenv>=1.1.1",
+]
